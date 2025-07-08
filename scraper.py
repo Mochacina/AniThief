@@ -3,6 +3,8 @@ from bs4 import BeautifulSoup
 import json
 import re
 import base64
+import subprocess
+import os
 from tqdm import tqdm
 from urllib.parse import urljoin
 from selenium import webdriver
@@ -95,7 +97,7 @@ class AniLifeScraper:
         return {'title': title, 'summary': summary, 'poster_url': poster_url, 'episodes': episodes, 'extra_info': extra_info}
 
     def get_video_info(self, provider_id, anime_id):
-        """[ULTIMATE FINAL Mk.XIX] 순수 Python & Selenium을 이용한 최종 다운로드 작전"""
+        """[FINAL ORDER] 최종 명령"""
         print(f"--- [DEBUG] get_video_info 시작 (Provider ID: {provider_id}, Anime ID: {anime_id}) ---")
         driver = None
         try:
@@ -113,6 +115,9 @@ class AniLifeScraper:
             driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
                 'source': "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             })
+
+            # --- [전략 회귀] JS를 처음부터 비활성화 ---
+            driver.execute_cdp_cmd("Emulation.setScriptExecutionDisabled", {"value": True})
             
             # 1-1단계: 상세 페이지 방문
             details_url = f"{self.BASE_URL}/detail/id/{anime_id}"
@@ -141,26 +146,16 @@ class AniLifeScraper:
             live_page_url = match.group(1)
             print(f"[DEBUG] 3단계: 최종 재생 페이지 URL 추출 성공 -> {live_page_url}")
 
-            # 4단계: JS를 비활성화하고 최종 페이지로 이동
-            print("[DEBUG] 4단계: JavaScript 비활성화...")
-            driver.execute_cdp_cmd("Emulation.setScriptExecutionDisabled", {"value": True})
-            
-            print(f"[DEBUG] 4단계: JS 비활성화 상태로 최종 페이지 요청 -> {live_page_url}")
-            
-            # [임시 디버깅] OS 기본 브라우저로 URL 열기
-            print(f"[DEBUG] 임시: OS 기본 브라우저로 URL 열기 -> {live_page_url}")
-            webbrowser.open(live_page_url)
-
+            # 4단계: 최종 페이지로 이동 (JS 비활성화 상태)
+            print(f"[DEBUG] 4단계: 최종 페이지 요청 (JS 비활성화) -> {live_page_url}")
             driver.get(live_page_url)
 
             # 5단계: 최종 페이지에서 데이터 추출
             print("[DEBUG] 5단계: 최종 페이지에서 데이터 추출 시도...")
             final_page_source = driver.page_source
-            # _aldata 변수 값을 더 안전하게 추출
-            # 공백 변화에 대응하기 위해 정규표현식 강화
             aldata_match = re.search(r"var\s+_aldata\s*=\s*'([^']*)'", final_page_source)
             if not aldata_match:
-                raise Exception("_aldata를 찾을 수 없음 (JS 비활성화 후)")
+                raise Exception("_aldata를 찾을 수 없음")
             
             encoded_aldata = aldata_match.group(1)
             print("[DEBUG] 5단계: _aldata 추출 성공")
@@ -177,8 +172,8 @@ class AniLifeScraper:
                 print(f"[DEBUG] 6단계: 패딩 {4 - missing_padding}개 추가됨.")
 
             # 서버가 비표준 인코딩(euc-kr)을 사용하므로, 해당 인코딩으로 디코딩
-            decoded_json_str = base64.b64decode(processed_aldata).decode('euc-kr')
-            video_data = json.loads(decoded_json_str)
+            aldata_decoded = base64.b64decode(processed_aldata).decode('euc-kr')
+            video_data = json.loads(aldata_decoded)
             encoded_video_path = video_data.get('vid_url_1080') or video_data.get('vid_url_720')
             if not encoded_video_path or encoded_video_path == "none":
                 raise Exception("JSON 데이터에서 비디오 URL을 찾을 수 없음")
@@ -188,60 +183,144 @@ class AniLifeScraper:
             m3u8_url = "https://" + cleaned_video_path
             print(f"[DEBUG] M3U8 URL 획득: {m3u8_url}")
 
-            # --- [NEW] M3U8 파일 직접 다운로드 ---
-            # 셀레니움이 가진 쿠키와 세션을 그대로 사용하여 m3u8 파일에 접근
-            print("[DEBUG] 7단계: 획득한 세션으로 M3U8 파일 다운로드 시도...")
+            # --- [NEW] FFMPEG를 위한 완전한 위장 정보 생성 ---
+            print("[DEBUG] 7단계: FFMPEG용 위조 여권(쿠키) 생성...")
             cookies = driver.get_cookies()
+            cookie_str = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
+            
+            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+
+            # FFMPEG에 전달할 모든 헤더를 하나의 문자열로 결합
+            headers = (
+                f"User-Agent: {user_agent}\r\n"
+                f"Referer: {live_page_url}\r\n"
+                f"Cookie: {cookie_str}\r\n"
+            )
+            
+            # 1차 응답(JSON)은 requests로 가져오기
             s = requests.Session()
+            s.headers.update({'User-Agent': user_agent, 'Referer': live_page_url})
             for cookie in cookies:
                 s.cookies.set(cookie['name'], cookie['value'])
             
-            headers = {
-                'Referer': live_page_url,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-            }
-            
-            m3u8_response = s.get(m3u8_url, headers=headers)
-            m3u8_response.raise_for_status()
-            
-            # 1차 응답은 JSON이므로, 여기서 진짜 m3u8 URL을 파싱
-            print("[DEBUG] 7-1단계: JSON 응답 파싱 시도...")
-            json_data = m3u8_response.json()
-            master_m3u8_url = json_data[0]['url']
-            print(f"[DEBUG] 7-2단계: 최종 Master M3U8 URL 획득 -> {master_m3u8_url}")
+            json_response = s.get(m3u8_url)
+            json_response.raise_for_status()
+            master_m3u8_url = json_response.json()[0]['url']
+            print(f"[DEBUG] 7-1단계: 최종 Master M3U8 URL 획득 -> {master_m3u8_url}")
 
-            # --- [NEW] FFMPEG로 다운로드 ---
-            print("[DEBUG] 8단계: FFMPEG를 사용하여 다운로드 시작...")
-            output_filename = f"{anime_id}_episode.mp4"
+            # --- [NEW] requests로 m3u8 내용 직접 가져오기 ---
+            print("[DEBUG] 8단계: requests로 M3U8 내용 직접 강탈 시도...")
+            m3u8_content_response = s.get(master_m3u8_url)
+            m3u8_content_response.raise_for_status()
+            m3u8_content = m3u8_content_response.text
+
+            # m3u8 파일 내의 상대 경로를 절대 경로로 수정
+            base_url = '/'.join(master_m3u8_url.split('/')[:-1])
+            m3u8_content_fixed = re.sub(r'^(?!#)(?!https?://)(.*)', fr'{base_url}/\1', m3u8_content, flags=re.MULTILINE)
+
+            playlist_path = "temp_playlist.m3u8"
+            with open(playlist_path, 'w', encoding='utf-8') as f:
+                f.write(m3u8_content_fixed)
+            print(f"[DEBUG] 8-1단계: M3U8 플레이리스트를 '{playlist_path}'에 저장 성공")
+
+            # --- [FINAL STRATEGY] 모든 부품을 로컬로 다운로드 후 확장자 변경 및 조립 ---
+            temp_dir = "temp_download"
+            # 작전 시작 전, 이전의 모든 임시 파일/폴더를 깨끗하게 청소한다.
+            if os.path.exists(temp_dir):
+                import shutil
+                shutil.rmtree(temp_dir)
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # 1. 모든 비디오 조각(.aaa) 다운로드
+            ts_urls = [line.strip() for line in m3u8_content_fixed.split('\n') if line.strip() and not line.startswith('#')]
+            print(f"[DEBUG] 9단계: 총 {len(ts_urls)}개의 비디오 조각 다운로드 시작...")
+            for i, ts_url in enumerate(tqdm(ts_urls, desc="Downloading Segments")):
+                ts_response = s.get(ts_url, headers={'Referer': live_page_url})
+                ts_response.raise_for_status()
+                local_ts_path = os.path.join(temp_dir, f"segment_{i:04d}.aaa")
+                with open(local_ts_path, 'wb') as f:
+                    f.write(ts_response.content)
+            print(f"[DEBUG] 10단계: 모든 세그먼트 다운로드 완료.")
+
+            # 2. 다운로드된 .aaa 파일들의 확장자를 .ts로 변경
+            print(f"[DEBUG] 11단계: .aaa -> .ts 확장자 변경 작업 시작...")
+            for i in range(len(ts_urls)):
+                segment_filename = f"segment_{i:04d}.aaa"
+                ts_filename = f"segment_{i:04d}.ts"
+                old_path = os.path.join(temp_dir, segment_filename)
+                new_path = os.path.join(temp_dir, ts_filename)
+                if os.path.exists(old_path):
+                    os.rename(old_path, new_path)
+            print(f"[DEBUG] 12단계: 확장자 변경 완료.")
+
+            # 3. 로컬 파일만 참조하는 최종 플레이리스트 생성
+            final_playlist_path = os.path.join(temp_dir, "playlist_final.m3u8")
+            # 원본 m3u8에서 EXTINF 시간 정보 추출
+            extinf_lines = [line for line in m3u8_content.splitlines() if line.startswith('#EXTINF')]
             
-            # FFMPEG 명령어 생성
-            # Referer와 User-Agent를 헤더로 전달하여 403 오류 회피
-            ffmpeg_headers = f"Referer: {live_page_url}\r\nUser-Agent: {headers['User-Agent']}\r\n"
+            with open(final_playlist_path, 'w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+                f.write("#EXT-X-VERSION:3\n")
+                # 원본 m3u8에서 TARGETDURATION 값을 가져오거나 기본값 사용
+                target_duration_match = re.search(r'#EXT-X-TARGETDURATION:(\d+)', m3u8_content)
+                if target_duration_match:
+                    f.write(f"#EXT-X-TARGETDURATION:{target_duration_match.group(1)}\n")
+                else:
+                    f.write("#EXT-X-TARGETDURATION:10\n") # 기본값
+                f.write("#EXT-X-MEDIA-SEQUENCE:0\n")
+
+                for i in range(len(ts_urls)):
+                    # 원본에 EXTINF 정보가 있다면 사용, 없다면 기본값 사용
+                    if i < len(extinf_lines):
+                        f.write(extinf_lines[i] + "\n")
+                    else:
+                        f.write("#EXTINF:4.000000,\n") # 기본값
+                    f.write(f"segment_{i:04d}.ts\n")
+                
+                f.write("#EXT-X-ENDLIST\n")
+            print(f"[DEBUG] 13단계: 최종 로컬 플레이리스트 '{final_playlist_path}' 생성 완료.")
+
+            # 4. 파일 경로 및 이름 규칙 설정
+            # video_data는 176번째 줄에서 이미 파싱되었으므로 재사용한다.
+            anime_title = video_data.get('ani_name', 'Unknown_Title')
+            anime_episode = video_data.get('ani_story', 'Unknown_Episode')
+
+            # 폴더명으로 사용할 수 없는 문자 제거 및 공백을 '_'로 변경
+            sanitized_title = re.sub(r'[\\/*?:"<>|]', '', anime_title).replace(' ', '_')
+
+            # 최종 저장 경로 생성
+            base_download_dir = "downloaded"
+            anime_dir = os.path.join(base_download_dir, f"{anime_id}_{sanitized_title}")
+            os.makedirs(anime_dir, exist_ok=True)
+            
+            output_filepath = os.path.join(anime_dir, f"{anime_episode}.mp4")
+            
+            print(f"[DEBUG] 14단계: 최종 저장 경로 설정 -> {output_filepath}")
+
+            # 5. FFmpeg로 비디오 병합
+            print("[DEBUG] 15단계: FFMPEG로 최종 조립 시작...")
+            ffmpeg_path = "ffmpeg.exe"
             command = [
-                'ffmpeg',
-                '-headers', ffmpeg_headers,
-                '-i', master_m3u8_url,
+                ffmpeg_path,
+                '-protocol_whitelist', 'file,pipe', # 로컬 파일만 허용하도록 명시
+                '-i', "playlist_final.m3u8",
                 '-c', 'copy',
-                '-bsf:a', 'aac_adtstoasc',
-                output_filename
+                # cwd가 temp_dir이므로, 절대 경로로 지정해줘야 함
+                os.path.abspath(output_filepath)
             ]
-            
-            print(f"[DEBUG] FFMPEG Command: {' '.join(command)}")
-
-            # FFMPEG 실행
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8')
-            
-            # 실시간 출력 (디버깅용)
+            process = subprocess.Popen(command, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
             for line in process.stdout:
                 print(f"[FFMPEG] {line.strip()}")
-
             process.wait()
 
             if process.returncode == 0:
-                print(f"[DEBUG] 최종 성공: 영상이 '{output_filename}'으로 저장되었습니다.")
-                return {'download_path': output_filename}
+                print(f"[DEBUG] 최종 성공: 영상이 '{output_filepath}'으로 저장되었습니다.")
+                # 임시 파일 정리
+                import shutil
+                shutil.rmtree(temp_dir)
+                return {'download_path': os.path.abspath(output_filepath)}
             else:
-                raise Exception(f"FFMPEG 다운로드 실패 (종료 코드: {process.returncode})")
+                raise Exception(f"FFMPEG 조립 실패 (종료 코드: {process.returncode})")
 
         except Exception as e:
             print(f"[DEBUG] 처리 중 오류 발생: {e}")

@@ -305,7 +305,7 @@ QPushButton:disabled { background-color: #4a5058; color: #888; }
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AniLife Player by Meister Helena")
+        self.setWindowTitle("AniLife Player by Brie/Helena")
         self.setGeometry(100, 100, 1200, 800)
         self.initUI()
 
