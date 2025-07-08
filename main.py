@@ -81,15 +81,19 @@ class PosterDownloader(QObject):
 class VideoWorker(QObject):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
-    def __init__(self, provider_id):
+    def __init__(self, provider_id, anime_id):
         super().__init__()
         self.provider_id = provider_id
+        self.anime_id = anime_id
         self.scraper = AniLifeScraper()
     def run(self):
+        print("[DEBUG] VideoWorker.run() 시작")
         try:
-            self.finished.emit(self.scraper.get_video_info(self.provider_id))
+            video_info = self.scraper.get_video_info(self.provider_id, self.anime_id)
+            self.finished.emit(video_info)
         except Exception as e:
             self.error.emit(str(e))
+        print("[DEBUG] VideoWorker.run() 종료")
 
 # --- Custom Widgets ---
 class SearchPageWidget(QWidget):
@@ -174,9 +178,10 @@ class SearchPageWidget(QWidget):
 
 class AnimeDetailWidget(QWidget):
     back_requested = pyqtSignal()
-    episode_selected = pyqtSignal(str)
+    episode_selected = pyqtSignal(str, str)
     def __init__(self):
         super().__init__()
+        self.current_anime_id = None
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
         self.poster_label = QLabel("포스터 로딩 중...")
@@ -214,11 +219,16 @@ class AnimeDetailWidget(QWidget):
         main_layout.addLayout(details_layout, 1)
 
     def on_episode_double_clicked(self, item):
+        print(f"[DEBUG] 에피소드 아이템 더블클릭: {item.text()}")
         provider_id = item.data(Qt.ItemDataRole.UserRole)
-        if provider_id:
-            self.episode_selected.emit(provider_id)
+        if provider_id and self.current_anime_id:
+            print(f"[DEBUG] Provider ID '{provider_id}'와 Anime ID '{self.current_anime_id}'로 episode_selected 시그널 발생")
+            self.episode_selected.emit(provider_id, self.current_anime_id)
+        else:
+            print(f"[DEBUG] Provider ID({provider_id}) 또는 Anime ID({self.current_anime_id})를 찾을 수 없음")
 
-    def update_details(self, data):
+    def update_details(self, data, anime_id=None):
+        self.current_anime_id = anime_id
         self.title_label.setText(data.get('title', 'N/A'))
         self.summary_label.setText(data.get('summary', 'N/A'))
         extra_info = data.get('extra_info', {})
@@ -327,13 +337,10 @@ class MainWindow(QMainWindow):
         for name in ["daily", "quarter", "top20", "genre"]:
              self.content_area.addWidget(self.pages[name])
         self.nav_button_group.buttonClicked.connect(self.switch_page)
-        
         self.setCentralWidget(main_widget)
-
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.set_status_message("준비 완료. 헬레나님, 출격 준비 완료!")
-        
         self.nav_buttons["search"].setChecked(True)
         self.content_area.setCurrentWidget(self.search_page)
 
@@ -373,7 +380,7 @@ class MainWindow(QMainWindow):
 
     def show_anime_details(self, anime_id):
         self.set_status_message(f"애니메이션 정보 로딩 중...")
-        self.detail_page.update_details({}) 
+        self.detail_page.update_details({}, anime_id) 
         self.content_area.setCurrentWidget(self.detail_page)
         self.detail_thread = QThread()
         self.detail_worker = DetailWorker(anime_id)
@@ -391,7 +398,7 @@ class MainWindow(QMainWindow):
             self.set_status_message("상세 정보를 불러오는 데 실패했습니다.")
             self.show_search_page()
         else:
-            self.detail_page.update_details(data)
+            self.detail_page.update_details(data, self.detail_page.current_anime_id)
             self.set_status_message(f"'{data.get('title', '')}' 정보 로드 완료.")
 
     def on_details_error(self, error_message):
@@ -402,10 +409,11 @@ class MainWindow(QMainWindow):
         self.content_area.setCurrentWidget(self.search_page)
         self.set_status_message("검색 페이지로 돌아왔습니다.")
 
-    def play_video(self, provider_id):
+    def play_video(self, provider_id, anime_id):
+        print(f"[DEBUG] play_video 슬롯 실행됨. Provider ID: {provider_id}, Anime ID: {anime_id}")
         self.set_status_message("비디오 정보 로딩 중...")
         self.video_thread = QThread()
-        self.video_worker = VideoWorker(provider_id)
+        self.video_worker = VideoWorker(provider_id, anime_id)
         self.video_worker.moveToThread(self.video_thread)
         self.video_thread.started.connect(self.video_worker.run)
         self.video_worker.finished.connect(self.on_video_info_loaded)
