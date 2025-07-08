@@ -3,6 +3,8 @@ from bs4 import BeautifulSoup
 import json
 import re
 import base64
+from tqdm import tqdm
+from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
@@ -93,7 +95,7 @@ class AniLifeScraper:
         return {'title': title, 'summary': summary, 'poster_url': poster_url, 'episodes': episodes, 'extra_info': extra_info}
 
     def get_video_info(self, provider_id, anime_id):
-        """[ULTIMATE FINAL Mk.XI] Selenium으로 상세페이지부터 방문하여 쿠키를 획득하고 비디오 URL을 가져옵니다."""
+        """[ULTIMATE FINAL Mk.XIX] 순수 Python & Selenium을 이용한 최종 다운로드 작전"""
         print(f"--- [DEBUG] get_video_info 시작 (Provider ID: {provider_id}, Anime ID: {anime_id}) ---")
         driver = None
         try:
@@ -155,7 +157,8 @@ class AniLifeScraper:
             print("[DEBUG] 5단계: 최종 페이지에서 데이터 추출 시도...")
             final_page_source = driver.page_source
             # _aldata 변수 값을 더 안전하게 추출
-            aldata_match = re.search(r"var _aldata = '([^']*)'", final_page_source)
+            # 공백 변화에 대응하기 위해 정규표현식 강화
+            aldata_match = re.search(r"var\s+_aldata\s*=\s*'([^']*)'", final_page_source)
             if not aldata_match:
                 raise Exception("_aldata를 찾을 수 없음 (JS 비활성화 후)")
             
@@ -163,9 +166,9 @@ class AniLifeScraper:
             print("[DEBUG] 5단계: _aldata 추출 성공")
 
             # 6단계: 데이터 해독
-            print("[DEBUG] 6단계: JS 이스케이프 시퀀스 처리 및 Base64 디코딩...")
-            # JS에서 넘어온 문자열의 이스케이프 시퀀스 처리
-            processed_aldata = encoded_aldata.encode().decode('unicode_escape')
+            print("[DEBUG] 6단계: Base64 디코딩 시도...")
+            # JS에서 넘어온 불필요한 백슬래시 제거
+            processed_aldata = encoded_aldata.replace('\\', '')
             
             # 패딩 처리
             missing_padding = len(processed_aldata) % 4
@@ -173,16 +176,72 @@ class AniLifeScraper:
                 processed_aldata += '=' * (4 - missing_padding)
                 print(f"[DEBUG] 6단계: 패딩 {4 - missing_padding}개 추가됨.")
 
-            decoded_json_str = base64.b64decode(processed_aldata).decode('utf-8')
+            # 서버가 비표준 인코딩(euc-kr)을 사용하므로, 해당 인코딩으로 디코딩
+            decoded_json_str = base64.b64decode(processed_aldata).decode('euc-kr')
             video_data = json.loads(decoded_json_str)
             encoded_video_path = video_data.get('vid_url_1080') or video_data.get('vid_url_720')
             if not encoded_video_path or encoded_video_path == "none":
                 raise Exception("JSON 데이터에서 비디오 URL을 찾을 수 없음")
             
-            decoded_video_path = base64.b64decode(encoded_video_path).decode('utf-8')
-            final_video_url = "https://" + decoded_video_path
-            print(f"[DEBUG] 최종 성공: 비디오 URL 생성 -> {final_video_url}")
-            return {'video_url': final_video_url}
+            # 최종 경로는 Base64 인코딩이 아니라, 슬래시가 이스케이프 처리된 문자열임
+            cleaned_video_path = encoded_video_path.replace('\\/', '/')
+            m3u8_url = "https://" + cleaned_video_path
+            print(f"[DEBUG] M3U8 URL 획득: {m3u8_url}")
+
+            # --- [NEW] M3U8 파일 직접 다운로드 ---
+            # 셀레니움이 가진 쿠키와 세션을 그대로 사용하여 m3u8 파일에 접근
+            print("[DEBUG] 7단계: 획득한 세션으로 M3U8 파일 다운로드 시도...")
+            cookies = driver.get_cookies()
+            s = requests.Session()
+            for cookie in cookies:
+                s.cookies.set(cookie['name'], cookie['value'])
+            
+            headers = {
+                'Referer': live_page_url,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
+            
+            m3u8_response = s.get(m3u8_url, headers=headers)
+            m3u8_response.raise_for_status()
+            
+            # 1차 응답은 JSON이므로, 여기서 진짜 m3u8 URL을 파싱
+            print("[DEBUG] 7-1단계: JSON 응답 파싱 시도...")
+            json_data = m3u8_response.json()
+            master_m3u8_url = json_data[0]['url']
+            print(f"[DEBUG] 7-2단계: 최종 Master M3U8 URL 획득 -> {master_m3u8_url}")
+
+            # --- [NEW] FFMPEG로 다운로드 ---
+            print("[DEBUG] 8단계: FFMPEG를 사용하여 다운로드 시작...")
+            output_filename = f"{anime_id}_episode.mp4"
+            
+            # FFMPEG 명령어 생성
+            # Referer와 User-Agent를 헤더로 전달하여 403 오류 회피
+            ffmpeg_headers = f"Referer: {live_page_url}\r\nUser-Agent: {headers['User-Agent']}\r\n"
+            command = [
+                'ffmpeg',
+                '-headers', ffmpeg_headers,
+                '-i', master_m3u8_url,
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                output_filename
+            ]
+            
+            print(f"[DEBUG] FFMPEG Command: {' '.join(command)}")
+
+            # FFMPEG 실행
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8')
+            
+            # 실시간 출력 (디버깅용)
+            for line in process.stdout:
+                print(f"[FFMPEG] {line.strip()}")
+
+            process.wait()
+
+            if process.returncode == 0:
+                print(f"[DEBUG] 최종 성공: 영상이 '{output_filename}'으로 저장되었습니다.")
+                return {'download_path': output_filename}
+            else:
+                raise Exception(f"FFMPEG 다운로드 실패 (종료 코드: {process.returncode})")
 
         except Exception as e:
             print(f"[DEBUG] 처리 중 오류 발생: {e}")

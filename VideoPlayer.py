@@ -107,9 +107,12 @@ class VideoPlayer(QDialog):
             elif sys.platform == "darwin":
                 self.player.set_nsobject(int(self.video_frame.winId()))
 
-    def play_video(self, url):
+    def play_video(self, path): # url 대신 path를 받음
         if not self.player: return
-        media = self.instance.media_new(url)
+        
+        # 로컬 파일을 재생할 때는 특별한 옵션이 필요 없음
+        print(f"[DEBUG] Playing local playlist: {path}")
+        media = self.instance.media_new(path)
         self.player.set_media(media)
         self.player.play()
         self.play_pause_button.setText("일시정지")

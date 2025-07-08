@@ -424,16 +424,12 @@ class MainWindow(QMainWindow):
         self.video_thread.start()
 
     def on_video_info_loaded(self, video_info):
-        video_url = video_info.get('video_url')
-        if video_url:
-            self.set_status_message("비디오를 재생합니다.")
-            if self.video_player and self.video_player.isVisible():
-                self.video_player.close()
-            self.video_player = VideoPlayer(self)
-            self.video_player.play_video(video_url)
-            self.video_player.show()
+        local_playlist = video_info.get('local_playlist')
+        download_path = video_info.get('download_path')
+        if download_path:
+            self.set_status_message(f"다운로드 완료! '{download_path}'에 저장되었습니다.")
         else:
-            self.set_status_message("비디오 URL을 찾을 수 없습니다.")
+            self.set_status_message("다운로드에 실패했습니다. 로그를 확인해주세요.")
 
     def set_status_message(self, message):
         self.status_bar.showMessage(message)
