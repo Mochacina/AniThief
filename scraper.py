@@ -7,6 +7,9 @@ import subprocess
 import os
 from tqdm import tqdm
 from urllib.parse import urljoin
+
+from PyQt6.QtCore import QObject, pyqtSignal
+
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
@@ -16,10 +19,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import webbrowser
 
-class AniLifeScraper:
+class AniLifeScraper(QObject):
+    # 시그널 정의
+    # progress_update: (현재 단계, 전체 단계, 메시지)
+    progress_update = pyqtSignal(int, int, str)
+    # sub_progress_update: (현재 값, 전체 값, 레이블) - 다운로드, FFMPEG 등 세부 진행률
+    sub_progress_update = pyqtSignal(int, int, str)
+    # finished: (결과 딕셔너리)
+    finished = pyqtSignal(dict)
+    # error: (에러 메시지)
+    error = pyqtSignal(str)
+
     BASE_URL = "https://anilife.live"
 
     def __init__(self):
+        super().__init__()
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
@@ -99,10 +113,12 @@ class AniLifeScraper:
     def get_video_info(self, provider_id, anime_id):
         """[FINAL ORDER] 최종 명령"""
         print(f"--- [DEBUG] get_video_info 시작 (Provider ID: {provider_id}, Anime ID: {anime_id}) ---")
+        self.progress_update.emit(0, 15, f"작업 시작 (Provider: {provider_id})")
         driver = None
         try:
             # 1단계: Selenium WebDriver 초기화
             print("[DEBUG] 1단계: Selenium WebDriver 초기화...")
+            self.progress_update.emit(1, 15, "Selenium WebDriver 초기화...")
             options = Options()
             options.add_argument("--headless")
             options.add_argument("--log-level=3")
@@ -122,11 +138,13 @@ class AniLifeScraper:
             # 1-1단계: 상세 페이지 방문
             details_url = f"{self.BASE_URL}/detail/id/{anime_id}"
             print(f"[DEBUG] 1단계: 상세 페이지 방문 시도 -> {details_url}")
+            self.progress_update.emit(2, 15, "상세 페이지 방문 및 쿠키 획득...")
             driver.get(details_url)
             print("[DEBUG] 1단계: 상세 페이지 방문 성공 (쿠키 획득 추정)")
 
             # 2단계: 리다이렉트된 페이지에서 실제 에피소드 링크 클릭
             print(f"[DEBUG] 2단계: Provider ID '{provider_id}'를 포함하는 링크 탐색 및 클릭 시도...")
+            self.progress_update.emit(3, 15, f"에피소드 링크 탐색...")
             wait = WebDriverWait(driver, 10)
             episode_link_xpath = f"//a[contains(@href, '{provider_id}')]"
             episode_link = wait.until(EC.element_to_be_clickable((By.XPATH, episode_link_xpath)))
@@ -136,9 +154,11 @@ class AniLifeScraper:
             # 2-1단계: Provider 페이지로 이동했는지 확인
             wait.until(EC.url_contains(f"/ani/provider/{provider_id}"))
             print("[DEBUG] 2-1단계: Provider 페이지로 성공적으로 이동함")
+            self.progress_update.emit(4, 15, "Provider 페이지로 이동...")
 
             # 3단계: Provider 페이지에서 JS를 실행하는 대신, URL을 추출
             print("[DEBUG] 3단계: Provider 페이지 소스에서 최종 URL 추출 시도...")
+            self.progress_update.emit(5, 15, "최종 재생 페이지 URL 추출...")
             provider_page_source = driver.page_source
             match = re.search(r"location\.href = \"(.*?/h/live\?p=.*?)\"", provider_page_source)
             if not match:
@@ -148,10 +168,12 @@ class AniLifeScraper:
 
             # 4단계: 최종 페이지로 이동 (JS 비활성화 상태)
             print(f"[DEBUG] 4단계: 최종 페이지 요청 (JS 비활성화) -> {live_page_url}")
+            self.progress_update.emit(6, 15, "최종 재생 페이지로 이동...")
             driver.get(live_page_url)
 
             # 5단계: 최종 페이지에서 데이터 추출
             print("[DEBUG] 5단계: 최종 페이지에서 데이터 추출 시도...")
+            self.progress_update.emit(7, 15, "비디오 데이터 추출...")
             final_page_source = driver.page_source
             aldata_match = re.search(r"var\s+_aldata\s*=\s*'([^']*)'", final_page_source)
             if not aldata_match:
@@ -162,6 +184,7 @@ class AniLifeScraper:
 
             # 6단계: 데이터 해독
             print("[DEBUG] 6단계: Base64 디코딩 시도...")
+            self.progress_update.emit(8, 15, "비디오 데이터 디코딩...")
             # JS에서 넘어온 불필요한 백슬래시 제거
             processed_aldata = encoded_aldata.replace('\\', '')
             
@@ -182,9 +205,11 @@ class AniLifeScraper:
             cleaned_video_path = encoded_video_path.replace('\\/', '/')
             m3u8_url = "https://" + cleaned_video_path
             print(f"[DEBUG] M3U8 URL 획득: {m3u8_url}")
+            self.progress_update.emit(9, 15, "M3U8 URL 획득...")
 
             # --- [NEW] FFMPEG를 위한 완전한 위장 정보 생성 ---
             print("[DEBUG] 7단계: FFMPEG용 위조 여권(쿠키) 생성...")
+            self.progress_update.emit(10, 15, "FFMPEG용 인증 정보 생성...")
             cookies = driver.get_cookies()
             cookie_str = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
             
@@ -207,9 +232,11 @@ class AniLifeScraper:
             json_response.raise_for_status()
             master_m3u8_url = json_response.json()[0]['url']
             print(f"[DEBUG] 7-1단계: 최종 Master M3U8 URL 획득 -> {master_m3u8_url}")
+            self.progress_update.emit(11, 15, "Master M3U8 URL 획득...")
 
             # --- [NEW] requests로 m3u8 내용 직접 가져오기 ---
             print("[DEBUG] 8단계: requests로 M3U8 내용 직접 강탈 시도...")
+            self.progress_update.emit(12, 15, "M3U8 플레이리스트 다운로드...")
             m3u8_content_response = s.get(master_m3u8_url)
             m3u8_content_response.raise_for_status()
             m3u8_content = m3u8_content_response.text
@@ -234,12 +261,14 @@ class AniLifeScraper:
             # 1. 모든 비디오 조각(.aaa) 다운로드
             ts_urls = [line.strip() for line in m3u8_content_fixed.split('\n') if line.strip() and not line.startswith('#')]
             print(f"[DEBUG] 9단계: 총 {len(ts_urls)}개의 비디오 조각 다운로드 시작...")
-            for i, ts_url in enumerate(tqdm(ts_urls, desc="Downloading Segments")):
+            self.progress_update.emit(13, 15, f"비디오 조각 다운로드 중...")
+            for i, ts_url in enumerate(ts_urls):
                 ts_response = s.get(ts_url, headers={'Referer': live_page_url})
                 ts_response.raise_for_status()
                 local_ts_path = os.path.join(temp_dir, f"segment_{i:04d}.aaa")
                 with open(local_ts_path, 'wb') as f:
                     f.write(ts_response.content)
+                self.sub_progress_update.emit(i + 1, len(ts_urls), "다운로드")
             print(f"[DEBUG] 10단계: 모든 세그먼트 다운로드 완료.")
 
             # 2. 다운로드된 .aaa 파일들의 확장자를 .ts로 변경
@@ -279,6 +308,7 @@ class AniLifeScraper:
                 
                 f.write("#EXT-X-ENDLIST\n")
             print(f"[DEBUG] 13단계: 최종 로컬 플레이리스트 '{final_playlist_path}' 생성 완료.")
+            self.progress_update.emit(14, 15, "로컬 플레이리스트 생성...")
 
             # 4. 파일 경로 및 이름 규칙 설정
             # video_data는 176번째 줄에서 이미 파싱되었으므로 재사용한다.
@@ -299,6 +329,8 @@ class AniLifeScraper:
 
             # 5. FFmpeg로 비디오 병합
             print("[DEBUG] 15단계: FFMPEG로 최종 조립 시작...")
+            self.progress_update.emit(15, 15, "영상 합치는 중 (FFMPEG)...")
+            
             ffmpeg_path = "ffmpeg.exe"
             command = [
                 ffmpeg_path,
@@ -308,22 +340,33 @@ class AniLifeScraper:
                 # cwd가 temp_dir이므로, 절대 경로로 지정해줘야 함
                 os.path.abspath(output_filepath)
             ]
+            # FFMPEG 진행률 표시는 일단 제거하고, 안정적인 버전으로 되돌림
             process = subprocess.Popen(command, cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
+            
+            # FFMPEG 진행률을 0%에서 100%로 서서히 올리는 것처럼 보이게 처리 (임시)
+            self.sub_progress_update.emit(0, 100, "영상 합치는 중...")
+            
             for line in process.stdout:
                 print(f"[FFMPEG] {line.strip()}")
+
             process.wait()
+            self.sub_progress_update.emit(100, 100, "영상 합치기 완료")
 
             if process.returncode == 0:
                 print(f"[DEBUG] 최종 성공: 영상이 '{output_filepath}'으로 저장되었습니다.")
                 # 임시 파일 정리
                 import shutil
                 shutil.rmtree(temp_dir)
+                self.finished.emit({'download_path': os.path.abspath(output_filepath)})
                 return {'download_path': os.path.abspath(output_filepath)}
             else:
+                # stderr_output 변수가 없으므로 제거
                 raise Exception(f"FFMPEG 조립 실패 (종료 코드: {process.returncode})")
 
         except Exception as e:
-            print(f"[DEBUG] 처리 중 오류 발생: {e}")
+            error_message = f"처리 중 오류 발생: {e}"
+            print(f"[DEBUG] {error_message}")
+            self.error.emit(error_message)
             if driver:
                 print("--- 현재 페이지 소스 ---")
                 print(driver.page_source)

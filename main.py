@@ -3,7 +3,7 @@ import requests
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QStackedWidget, QLabel, QStatusBar, QButtonGroup,
-    QLineEdit, QListWidget, QListWidgetItem, QTextEdit
+    QLineEdit, QListWidget, QListWidgetItem, QTextEdit, QProgressBar, QDialog
 )
 from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QImage, QIcon
@@ -79,23 +79,73 @@ class PosterDownloader(QObject):
             self.finished.emit(QPixmap())
 
 class VideoWorker(QObject):
+    progress_update = pyqtSignal(int, int, str)
+    sub_progress_update = pyqtSignal(int, int, str)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
+
     def __init__(self, provider_id, anime_id):
         super().__init__()
         self.provider_id = provider_id
         self.anime_id = anime_id
-        self.scraper = AniLifeScraper()
+        # Scraper는 run 메소드 안에서, 해당 스레드에서 생성되어야 함
+        self.scraper = None
+
     def run(self):
         print("[DEBUG] VideoWorker.run() 시작")
-        try:
-            video_info = self.scraper.get_video_info(self.provider_id, self.anime_id)
-            self.finished.emit(video_info)
-        except Exception as e:
-            self.error.emit(str(e))
+        self.scraper = AniLifeScraper()
+
+        # Scraper의 시그널을 Worker의 시그널로 다시 전달(re-emit)
+        self.scraper.progress_update.connect(self.progress_update)
+        self.scraper.sub_progress_update.connect(self.sub_progress_update)
+        self.scraper.finished.connect(self.finished)
+        self.scraper.error.connect(self.error)
+
+        # Scraper가 자체적으로 finished/error 시그널을 보내므로,
+        # Worker는 그냥 실행만 시키면 됨.
+        self.scraper.get_video_info(self.provider_id, self.anime_id)
         print("[DEBUG] VideoWorker.run() 종료")
 
 # --- Custom Widgets ---
+class ProgressDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("다운로드 진행률")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        
+        self.main_progress_label = QLabel("전체 진행률: 대기 중...")
+        self.main_progress_bar = QProgressBar()
+        self.sub_progress_label = QLabel("세부 진행률:")
+        self.sub_progress_bar = QProgressBar()
+        
+        layout.addWidget(self.main_progress_label)
+        layout.addWidget(self.main_progress_bar)
+        layout.addWidget(self.sub_progress_label)
+        layout.addWidget(self.sub_progress_bar)
+
+        # 사용자가 창을 닫지 못하도록 설정 (선택 사항)
+        self.setModal(True)
+
+    def update_main_progress(self, current, total, message):
+        self.main_progress_bar.setRange(0, total)
+        self.main_progress_bar.setValue(current)
+        self.main_progress_label.setText(f"전체 진행률: {message} ({current}/{total})")
+
+    def update_sub_progress(self, current, total, label):
+        self.sub_progress_bar.setRange(0, total)
+        self.sub_progress_bar.setValue(current)
+        self.sub_progress_label.setText(f"{label}: {current} / {total}")
+
+    def set_finished_status(self, message, success):
+        self.main_progress_label.setText(message)
+        self.sub_progress_label.setText("완료" if success else "실패")
+        self.main_progress_bar.setValue(self.main_progress_bar.maximum())
+        self.sub_progress_bar.setValue(self.sub_progress_bar.maximum())
+        # 완료 후 자동으로 닫히게 하려면 self.accept() 호출
+        # self.accept()
+
 class SearchPageWidget(QWidget):
     anime_selected = pyqtSignal(str)
     def __init__(self, status_bar_callback):
@@ -222,6 +272,8 @@ class AnimeDetailWidget(QWidget):
         print(f"[DEBUG] 에피소드 아이템 더블클릭: {item.text()}")
         provider_id = item.data(Qt.ItemDataRole.UserRole)
         if provider_id and self.current_anime_id:
+            # 다운로드 시작 시, 리스트를 비활성화 하도록 MainWindow에 요청
+            self.episodes_list.setEnabled(False)
             print(f"[DEBUG] Provider ID '{provider_id}'와 Anime ID '{self.current_anime_id}'로 episode_selected 시그널 발생")
             self.episode_selected.emit(provider_id, self.current_anime_id)
         else:
@@ -411,25 +463,44 @@ class MainWindow(QMainWindow):
 
     def play_video(self, provider_id, anime_id):
         print(f"[DEBUG] play_video 슬롯 실행됨. Provider ID: {provider_id}, Anime ID: {anime_id}")
-        self.set_status_message("비디오 정보 로딩 중...")
+        
+        self.progress_dialog = ProgressDialog(self)
+        
         self.video_thread = QThread()
         self.video_worker = VideoWorker(provider_id, anime_id)
         self.video_worker.moveToThread(self.video_thread)
-        self.video_thread.started.connect(self.video_worker.run)
-        self.video_worker.finished.connect(self.on_video_info_loaded)
-        self.video_worker.error.connect(self.on_details_error)
+
+        # Worker의 시그널을 ProgressDialog의 슬롯에 연결
+        self.video_worker.progress_update.connect(self.progress_dialog.update_main_progress)
+        self.video_worker.sub_progress_update.connect(self.progress_dialog.update_sub_progress)
+        self.video_worker.finished.connect(self.on_download_finished)
+        self.video_worker.error.connect(self.on_download_error)
+        
+        # 스레드 및 워커 정리
         self.video_worker.finished.connect(self.video_thread.quit)
+        self.video_worker.error.connect(self.video_thread.quit)
         self.video_worker.finished.connect(self.video_worker.deleteLater)
         self.video_thread.finished.connect(self.video_thread.deleteLater)
-        self.video_thread.start()
 
-    def on_video_info_loaded(self, video_info):
-        local_playlist = video_info.get('local_playlist')
-        download_path = video_info.get('download_path')
-        if download_path:
-            self.set_status_message(f"다운로드 완료! '{download_path}'에 저장되었습니다.")
-        else:
-            self.set_status_message("다운로드에 실패했습니다. 로그를 확인해주세요.")
+        self.video_thread.started.connect(self.video_worker.run)
+        self.video_thread.start()
+        
+        self.progress_dialog.show()
+
+    def on_download_finished(self, result):
+        download_path = result.get('download_path')
+        message = f"다운로드 완료! '{download_path}'" if download_path else "다운로드 실패."
+        self.set_status_message(message)
+        self.progress_dialog.set_finished_status(message, success=bool(download_path))
+        self.detail_page.episodes_list.setEnabled(True)
+        # self.progress_dialog.accept() # 완료 후 자동으로 닫기
+
+    def on_download_error(self, error_message):
+        message = f"오류 발생: {error_message}"
+        self.set_status_message(message)
+        self.progress_dialog.set_finished_status(message, success=False)
+        self.detail_page.episodes_list.setEnabled(True)
+        # self.progress_dialog.accept() # 완료 후 자동으로 닫기
 
     def set_status_message(self, message):
         self.status_bar.showMessage(message)
