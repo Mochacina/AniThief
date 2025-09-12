@@ -198,6 +198,12 @@ class SearchPageWidget(QWidget):
             for data in results:
                 list_item = QListWidgetItem(f"  {data['title']}")
                 list_item.setData(Qt.ItemDataRole.UserRole, data)
+
+                # 썸네일 공간을 미리 확보하기 위해 투명한 아이콘 설정
+                placeholder_pixmap = QPixmap(self.results_list.iconSize())
+                placeholder_pixmap.fill(Qt.GlobalColor.transparent)
+                list_item.setIcon(QIcon(placeholder_pixmap))
+
                 self.results_list.addItem(list_item)
                 thumbnail_url = data.get('thumbnail_url')
                 if thumbnail_url:
