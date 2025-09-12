@@ -243,14 +243,14 @@ class AnimeDetailWidget(QWidget):
         details_layout = QVBoxLayout()
         details_layout.setSpacing(10)
         top_layout = QHBoxLayout()
-        back_button = QPushButton("<- 뒤로가기")
+        back_button = QPushButton("◀ 뒤로가기")
         back_button.clicked.connect(self.back_requested.emit)
         back_button.setFixedWidth(100)
         self.title_label = QLabel("제목")
         self.title_label.setStyleSheet("font-size: 22px; font-weight: bold;")
         self.title_label.setWordWrap(True)
-        top_layout.addWidget(back_button)
         top_layout.addWidget(self.title_label, 1)
+        top_layout.addWidget(back_button)
         details_layout.addLayout(top_layout)
         details_layout.addWidget(QLabel("상세 정보"))
         self.info_text = QTextEdit()
@@ -281,8 +281,8 @@ class AnimeDetailWidget(QWidget):
 
     def update_details(self, data, anime_id=None):
         self.current_anime_id = anime_id
-        self.title_label.setText(data.get('title', 'N/A'))
-        self.summary_label.setText(data.get('summary', 'N/A'))
+        self.title_label.setText(data.get('title', 'Loading...'))
+        self.summary_label.setText(data.get('summary', ''))
         extra_info = data.get('extra_info', {})
         info_html = ""
         for key, value in extra_info.items():
